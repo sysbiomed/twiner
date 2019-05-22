@@ -1,11 +1,12 @@
 “Twiner: correlation-based regularization for identifying common cancer gene signatures”
 Marta B. Lopes, Sandra Casimiro and Susana Vinga
+BMC Bioinformatics (submitted) 
 
 *******************
 SUPPLEMENTARY DATA 
 *******************
 
-BMC Bioinformatics (submitted) 
+
 
 The following Rmd and html files allow fully reproducibility of the results reported.
 
