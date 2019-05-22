@@ -1,0 +1,761 @@
+---
+title: "Extracting gene signatures from breast ER+ and prostate cancers"
+author: "M.B. Lopes, S. Casimiro, and S. Vinga"
+date: "March, 2019"
+output:
+  html_document:
+    number_sections: yes
+    toc: yes
+  pdf_document:
+    number_sections: yes"N"
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data extraction from TCGA
+
+The Cancer Genome Atlas data collection is part of a larger effort to build a research community focused on connecting cancer phenotypes to genotypes by providing clinical images matched to subjects from The Cancer Genome Atlas ([TCGA](https://cancergenome.nih.gov/)).
+
+## Breast Invasive Carcinoma (BRCA)
+
+The BRCA data is publicly available (https://cancergenome.nih.gov/) and is decomposed into two datasets:
+
+1. the gene expression data, composed of 57251 variables for a total of 1222 samples with 1097 individuals. From those samples, 1102 with primary solid tumor, 7 metastatic and 113 with normal tissue;
+
+2. the clinical data is composed of 113 variables obtained from the same individuals (much more is available in the gdc data variable, such as follow_up, drug, radiation, ...)
+
+Extracting the protein coding genes from the Ensembl genome browser and the Consensus CDS project:
+
+I. Installing the libraries
+
+```{r}
+#source("http://bioconductor.org/biocLite.R")
+#biocLite(c('ensembldb', 'EnsDb.Hsapiens.v86'))
+
+suppressPackageStartupMessages({
+     library(ensembldb)
+     library(EnsDb.Hsapiens.v86)
+     library(futile.logger)
+     .Last.value <- flog.layout(layout.format('~m'))
+})
+```
+
+II. Load ensembl data
+
+Ensembl is a genome browser for vertebrate genomes that supports research in comparative genomics, evolution, sequence variation and transcriptional regulation. Ensembl annotate genes, computes multiple alignments, predicts regulatory function and collects disease data. Ensembl tools include BLAST, BLAT, BioMart and the Variant Effect Predictor (VEP) for all supported species.
+
+- [Home page](http://www.ensembl.org/index.html)
+
+```{r,warning=FALSE,message=FALSE}
+edb <- EnsDb.Hsapiens.v86
+# hasProteinData(edb) # from devel only, as of 3.4
+ensembl.protein.coding <- genes(edb,
+                                filter = list(GenebiotypeFilter('protein_coding')),
+                                columns = c('gene_id', 'gene_name'))
+{
+  flog.info('         Granges: %d', nrow(ensembl.protein.coding@elementMetadata))
+  flog.info('Metadata columns: %d', ncol(ensembl.protein.coding@elementMetadata))
+}
+```
+
+III. Load ccds data
+
+The Consensus CDS (CCDS) project is a collaborative effort to identify a core set of human and mouse protein coding regions that are consistently annotated and of high quality. The long term goal is to support convergence towards a standard set of gene annotations.
+
+- [Home page](https://www.ncbi.nlm.nih.gov/projects/CCDS/CcdsBrowse.cgi)
+- [Statistics or release 20](https://www.ncbi.nlm.nih.gov/projects/CCDS/CcdsBrowse.cgi?REQUEST=SHOW_STATISTICS)
+
+```{r,warning=FALSE,message=FALSE}
+ccds <- read.table(url('ftp://ftp.ncbi.nih.gov/pub/CCDS/current_human/CCDS.current.txt'),
+                   sep = '\t',
+                   header = T,
+                   comment.char = "|", 
+                   stringsAsFactors = FALSE)
+flog.info('Size of ccds: %d x %d', nrow(ccds), ncol(ccds))
+```
+
+```{r,warning=FALSE,message=FALSE}
+ensembl.genes         <- sort(unique(ensembl.protein.coding@elementMetadata$gene_name))
+ensembl.genes.ensg.id <- sort(ensembl.protein.coding@elementMetadata$gene_id)
+
+ccds.genes <- sort(unique(ccds$gene))
+ccds.extra.genes <- sort(ccds.genes[(!ccds.genes %in% ensembl.genes)])
+ccds.extra.genes.ensg.id <- genes(edb, filter = list(GenenameFilter(ccds.extra.genes)),
+                                  columns = c('gene_id', 'gene_name'))
+
+ensg.id <- sort(unique(c(ensembl.protein.coding@elementMetadata$gene_id, ensembl.genes.ensg.id)))
+
+all.genes <- sort(unique(c(ensembl.genes, ccds.extra.genes)))
+```
+
+
+The BRCA datasets will be imported using the package 'brca.data':
+
+```{r,warning=FALSE,message=FALSE}
+# Package developed by our group server
+#library(devtools)
+#devtools::install_url('https://github.com/averissimo/brca.data/releases/download/1.0/brca.data_1.0.tar.gz')
+
+library(brca.data)
+
+data('fpkm.per.tissue', 'fpkm.per.tissue.barcode', 'clinical', package = 'brca.data')
+brca_tumor <- fpkm.per.tissue$primary.solid.tumor
+dim(brca_tumor)
+# 1091 tumor tissue samples
+
+brca_tumor <- t(brca_tumor[,-which(duplicated(getParticipantCode(colnames(fpkm.per.tissue$primary.solid.tumor))))]) # removing duplicated samples
+dim(brca_tumor)
+
+# considering only ER+ cases
+brca_tumor_erplus_id <- clinical$primary.solid.tumor[which(clinical$primary.solid.tumor[,51]=='Positive'),c(1,51)]
+
+brca_tumor_erplus <- brca_tumor[which(getParticipantCode(rownames(brca_tumor)) %in% brca_tumor_erplus_id[,1]),]
+dim(brca_tumor_erplus)
+# 803 tumor tissue samples
+
+# survival data
+# Filter data for further survival analysis based on the clinical data
+# colnames(clinical$primary.solid.tumor)
+brca_survival_status <- clinical$primary.solid.tumor[,c(10,7)]
+brca_survival_status[which(brca_survival_status[,2]=="Alive"),1] <- clinical$primary.solid.tumor[which(brca_survival_status[,2]=="Alive"),11]
+brca_survival_status <- brca_survival_status[-which(is.na(brca_survival_status)),]
+
+brca_tumor_erplus <- brca_tumor_erplus[which(getParticipantCode(rownames(brca_tumor_erplus)) %in% rownames(brca_survival_status)),]
+brca_survival_status <- brca_survival_status[which(rownames(brca_survival_status) %in% getParticipantCode(rownames(brca_tumor_erplus))),]
+
+dim(brca_tumor_erplus)
+
+brca_normal <- fpkm.per.tissue$solid.tissue.normal
+dim(brca_normal)
+# 113 normal tissue samples
+
+# considering only ER+ cases
+brca_normal_erplus_id <- clinical$solid.tissue.normal[which(clinical$solid.tissue.normal[,51]=='Positive'),c(1,51)]
+
+brca_normal_erplus <- t(brca_normal[,which(getParticipantCode(colnames(brca_normal)) %in% brca_normal_erplus_id[,1])])
+dim(brca_normal_erplus)
+# 79 normal tissue samples
+
+brca_data <- rbind(brca_tumor_erplus,brca_normal_erplus)
+
+dim(brca_data)
+# 915 is the total number of samples
+```
+
+Building the response Y and X gene expression data matrices:
+
+```{r}
+xbrca <- brca_data[,which(colnames(brca_data) %in% ensg.id)]
+ybrca <- c(rep(1,dim(brca_tumor_erplus)[1]),rep(0,dim(brca_normal_erplus)[1]))
+
+dim(xbrca)
+length(ybrca)
+
+```
+
+## Prostate Adenocarcinoma (PRAD)
+
+The PRAD data is publicly available (https://cancergenome.nih.gov/) and is decomposed into two datasets:
+
+1. the gene expression data, composed of 57035 variables for a total of 551 samples with 500 individuals. From those samples, 498 with primary solid tumor, 1 metastatic and 52 with normal tissue;
+
+2. the clinical data is composed of 68 variables obtained from the same individuals (much more is available in the gdc data variable, such as follow_up, drug, radiation, ...)
+
+The PRAD datasets will be imported using the package 'prad.data':
+
+```{r,warning=FALSE,message=FALSE}
+# Package developed by our group
+#library(devtools)
+#devtools::install_url('https://github.com/averissimo/tcga.data/releases/download/2017.07.21-prad/prad.data_1.0.tar.gz')
+
+library(prad.data)
+
+data('fpkm.per.tissue', 'fpkm.per.tissue.barcode', 'clinical', package = 'prad.data')
+prad_tumor <- fpkm.per.tissue$primary.solid.tumor
+
+prad_tumor <- t(prad_tumor[,-which(duplicated(getParticipantCode(colnames(fpkm.per.tissue$primary.solid.tumor))))]) # removing duplicated samples
+dim(prad_tumor)
+# 495 tumor tissue samples
+
+# survival data
+# Filter data for further survival analysis based on the clinical data
+# colnames(clinical$primary.solid.tumor)
+prad_survival_status <- clinical$primary.solid.tumor[,c(8,6)]
+prad_survival_status[which(prad_survival_status[,2]=="Alive"),1] <- clinical$primary.solid.tumor[which(prad_survival_status[,2]=="Alive"),9]
+
+prad_tumor <- prad_tumor[which(getParticipantCode(rownames(prad_tumor)) %in% rownames(prad_survival_status)),]
+dim(prad_tumor)
+
+prad_normal <- t(fpkm.per.tissue$solid.tissue.normal)
+dim(prad_normal)
+# 52 normal tissue samples
+
+prad_data <- rbind(prad_tumor,prad_normal)
+dim(prad_data)
+# 547 is the total number of samples
+```
+
+Building the response Y and X gene expression data matrices:
+
+```{r}
+xprad <- prad_data[,which(colnames(prad_data) %in% ensg.id)]
+yprad <- c(rep(1,dim(prad_tumor)[1]),rep(0,dim(prad_normal)[1]))
+dim(xprad)
+length(yprad)
+```
+
+
+# Classification modeling
+
+Classification by sparse logistic regression.
+
+
+## BRCA/PRAD tumor tissue vs. normal tissue
+
+Combining BRCA and PRAD tumor and normal data into a single data matrix:
+
+```{r}
+# removing variables with sd=0
+xbrca_sd <- xbrca[,sapply(seq(ncol(xbrca)), function(ix) {sd(xbrca[,ix])}) != 0]
+xprad_sd <- xprad[,sapply(seq(ncol(xprad)), function(ix) {sd(xprad[,ix])}) != 0]
+
+xbrca_less <- xbrca_sd[,which(colnames(xbrca_sd) %in% colnames(xprad_sd))]
+xprad_less <- xprad_sd[,which(colnames(xprad_sd) %in% colnames(xbrca_sd))]
+
+xdata <- scale(rbind(log2(xbrca_less+1),log2(xprad_less+1)))
+ydata <- c(ybrca,yprad)
+ylabel <- c(rep("b",length(ybrca)),rep("p",length(yprad)))
+
+xdata_less <- xdata
+
+```
+
+Building a weight vector that penalizes genes with larger distances between BRCA and PRAD correlation matrices
+
+```{r,warning=FALSE,message=FALSE}
+# normalizing data
+xbrca_norm <- scale(log2(xbrca_less+1))
+xprad_norm <- scale(log2(xprad_less+1))
+
+xbrca_cor_aux <- xbrca_norm
+xprad_cor_aux <- xprad_norm
+
+## correlation matrices
+
+library("propagate")
+library("lsa")
+
+xbrca_cor <- bigcor(xbrca_cor_aux, y = NULL, fun = "cor", size = 2000, verbose=FALSE)
+xbrca_cor <- as.data.frame(as.ffdf(xbrca_cor))
+
+xprad_cor <- bigcor(xprad_cor_aux, y = NULL, fun = "cor", size = 2000, verbose=FALSE)
+xprad_cor <- as.data.frame(as.ffdf(xprad_cor))
+
+# angular distance
+ang_weight <- vector()
+
+for (i in 1:dim(xdata_less)[2]){
+ang_weight[i] <- acos(cosine(xbrca_cor[,i],xprad_cor[,i]))/pi
+}
+
+variables_interest_weight <- which(ang_weight < acos(0.25)/pi)
+xdata_less <- xdata[,variables_interest_weight]
+brcaprad_weights_netw <- ang_weight[variables_interest_weight]
+
+##normalized weights (between 0 and 1)
+brcaprad_weights_netw_norm <- brcaprad_weights_netw / max(brcaprad_weights_netw)
+brcaprad_weights_netw <- brcaprad_weights_netw_norm
+```
+
+Comparing model predictive performing either using network information or not, based on resampling (100 random train and test samples)
+
+```{r,warning=FALSE,message=FALSE}
+# Performing 100 train and test boostrap samples
+times_boot <- 100
+
+nvar_selected_brcaprad_tn <- matrix(0,2,times_boot)
+miscl_train_brcaprad_tn <- matrix(0,2,times_boot)
+miscl_test_brcaprad_tn <- matrix(0,2,times_boot)
+mse_train_brcaprad_tn <- matrix(0,2,times_boot)
+mse_test_brcaprad_tn <- matrix(0,2,times_boot)
+var_selected <- vector()
+var_selected_netw <- vector()
+var_selected_idx <- vector()
+var_selected_netw_idx <- vector()
+pr_auc_train_brcaprad_tn <- matrix(0,2,times_boot)
+pr_auc_test_brcaprad_tn <- matrix(0,2,times_boot)
+
+set.seed(1979)
+
+new_test_id_matrix <- matrix(0,round(dim(xdata_less)[1]*0.25),times_boot) 
+
+# building random selected training and test sets (25 % assigned for testing)
+for (i in 1:times_boot){
+new_test_id_matrix[,i] <- sample(1:dim(xdata_less)[1],round(dim(xdata_less)[1]*0.25),replace=FALSE)
+}
+
+# assigning samples to folds
+set.seed(2010)
+my_foldid_brcaprad_tn <- sample(1:10,size=dim(xdata_less[-new_test_id_matrix[,i],])[1]
+,replace=TRUE)
+
+for (i in 1:times_boot){
+
+new_xtrain <- xdata_less[-new_test_id_matrix[,i],]
+new_ytrain <- ydata[-new_test_id_matrix[,i]]
+
+new_xtest <- xdata_less[new_test_id_matrix[,i],]
+new_ytest <- ydata[new_test_id_matrix[,i]]
+
+# Classification by sparse logistic regression
+
+## with the elastic net (EN) penalty
+
+library(glmnet)
+
+fit_EN_cv_brcaprad_tn <- cv.glmnet(new_xtrain, as.factor(new_ytrain), family="binomial", nfolds=10, alpha=0.9, foldid=my_foldid_brcaprad_tn, type.measure="mse")
+
+var_selected_EN_brcaprad_tn_idx <- which(fit_EN_cv_brcaprad_tn$glmnet.fit$beta[,which(fit_EN_cv_brcaprad_tn$cvm == min(fit_EN_cv_brcaprad_tn$cvm))] != 0)
+
+nvar_selected_brcaprad_tn[1,i] <- length(var_selected_EN_brcaprad_tn_idx)
+
+var_selected_idx <- c(var_selected_idx,var_selected_EN_brcaprad_tn_idx)
+
+var_selected <- c(var_selected,as.matrix(mcols(ensembl.protein.coding[colnames(new_xtrain[,var_selected_EN_brcaprad_tn_idx]),2])))
+
+# misclassifications, MSE, ROC and PR
+
+# train set
+pred_EN_train_brcaprad_tn <- predict(fit_EN_cv_brcaprad_tn,new_xtrain,type="response")
+table(new_ytrain,round(pred_EN_train_brcaprad_tn))
+miscl_train_brcaprad_tn[1,i] <- length(which(new_ytrain !=round(pred_EN_train_brcaprad_tn)))
+
+mse_train_brcaprad_tn[1,i] <- mean((new_ytrain - pred_EN_train_brcaprad_tn)^2)
+
+library(PRROC)
+
+pr_auc_train_brcaprad_tn[1,i] <- pr.curve(scores.class0=as.vector(round(pred_EN_train_brcaprad_tn)), weights.class0=new_ytrain)$auc.integral
+
+# test set
+pred_EN_test_brcaprad_tn <- predict(fit_EN_cv_brcaprad_tn,new_xtest,type="response")
+table(new_ytest,round(pred_EN_test_brcaprad_tn))
+miscl_test_brcaprad_tn[1,i] <- length(which(new_ytest !=round(pred_EN_test_brcaprad_tn)))
+
+mse_test_brcaprad_tn[1,i] <- mean((new_ytest - pred_EN_test_brcaprad_tn)^2)
+
+pr_auc_test_brcaprad_tn[1,i] <- pr.curve(scores.class0=as.vector(round(pred_EN_test_brcaprad_tn)), weights.class0=new_ytest)$auc.integral
+
+# with network-based information
+
+fit_ENnetw_cv_brcaprad_tn <- cv.glmnet(new_xtrain, as.factor(new_ytrain), family="binomial", nfolds=10, alpha=0.9, foldid=my_foldid_brcaprad_tn, penalty.factor=brcaprad_weights_netw,type.measure="mse")
+
+var_selected_ENnetw_brcaprad_tn_idx <- which(fit_ENnetw_cv_brcaprad_tn$glmnet.fit$beta[,which(fit_ENnetw_cv_brcaprad_tn$cvm == min(fit_ENnetw_cv_brcaprad_tn$cvm))] != 0)
+
+nvar_selected_brcaprad_tn[2,i] <- length(var_selected_ENnetw_brcaprad_tn_idx)
+
+var_selected_netw_idx <- c(var_selected_netw_idx,var_selected_ENnetw_brcaprad_tn_idx)
+
+var_selected_netw <- c(var_selected_netw,as.matrix(mcols(ensembl.protein.coding[colnames(new_xtrain[,var_selected_ENnetw_brcaprad_tn_idx]),2])))
+
+# misclassifications, MSE, ROC and PR 
+
+# train set
+pred_ENnetw_train_brcaprad_tn <- predict(fit_ENnetw_cv_brcaprad_tn,new_xtrain,type="response")
+table(new_ytrain,round(pred_ENnetw_train_brcaprad_tn))
+miscl_train_brcaprad_tn[2,i] <- length(which(new_ytrain !=round(pred_ENnetw_train_brcaprad_tn)))
+
+mse_train_brcaprad_tn[2,i] <- mean((new_ytrain - pred_ENnetw_train_brcaprad_tn)^2)
+
+pr_auc_train_brcaprad_tn[2,i] <- pr.curve(scores.class0=as.vector(round(pred_ENnetw_train_brcaprad_tn)), weights.class0=new_ytrain)$auc.integral
+
+# test set
+pred_ENnetw_test_brcaprad_tn <- predict(fit_ENnetw_cv_brcaprad_tn,new_xtest,type="response")
+table(new_ytest,round(pred_ENnetw_test_brcaprad_tn))
+miscl_test_brcaprad_tn[2,i] <- length(which(new_ytest !=round(pred_ENnetw_test_brcaprad_tn)))
+
+mse_test_brcaprad_tn[2,i] <- mean((new_ytest - pred_ENnetw_test_brcaprad_tn)^2)
+
+pr_auc_test_brcaprad_tn[2,i] <- pr.curve(scores.class0=as.vector(round(pred_ENnetw_test_brcaprad_tn)), weights.class0=new_ytest)$auc.integral
+
+rm(new_xtrain,new_xtest,new_ytrain,new_ytest)
+}
+```
+
+Summary numbers for each modeling strategy
+
+```{r}
+# median number of variables selected
+apply(nvar_selected_brcaprad_tn,1,median)
+
+# median number of misclassifications in the train set
+round(apply(round(miscl_train_brcaprad_tn),1,median))
+
+# median number of misclassifications in the test set
+round(apply(round(miscl_test_brcaprad_tn),1,median))
+
+# median squared error in the train set
+apply(mse_train_brcaprad_tn,1,median)
+
+# median squared error in the test set
+apply(mse_test_brcaprad_tn,1,median)
+
+# median PR AUC in the train set
+apply(pr_auc_train_brcaprad_tn,1,median)
+
+# median PR AUC in the test set
+apply(pr_auc_test_brcaprad_tn,1,median)
+
+# improvement in model predictive performance (MSE) by incorporating network-based information
+# train
+median((mse_train_brcaprad_tn[1,]-mse_train_brcaprad_tn[2,])*100/mse_train_brcaprad_tn[1,])
+#test
+median((mse_test_brcaprad_tn[1,]-mse_test_brcaprad_tn[2,])*100/mse_test_brcaprad_tn[1,])
+```
+
+Genes selected
+
+```{r}
+# variables always selected by penalized logistic regression in the 100 bootstrap samples
+var_selected_alw_select <- as.numeric(names(which(table(var_selected_idx)>99)))
+var_selected_alw_select_code <- as.matrix(mcols(ensembl.protein.coding[colnames(xdata_less[,var_selected_alw_select]),2]))
+var_selected_alw_select_code
+
+# variables selected in more than 75% of the bootstrap runs by penalized logistic regression
+var_selected_75_select <- as.numeric(names(which(table(var_selected_idx)>75)))
+var_selected_75_select_code <- as.matrix(mcols(ensembl.protein.coding[colnames(xdata_less[,var_selected_75_select]),2]))
+var_selected_75_select_code
+
+# variables always selected by network-based penalized logistic regression in the 100 bootstrap samples
+var_selected_netw_alw_select <- as.numeric(names(which(table(var_selected_netw_idx)>99)))
+var_selected_netw_alw_select_code <- as.matrix(mcols(ensembl.protein.coding[colnames(xdata_less[,var_selected_netw_alw_select]),2]))
+var_selected_netw_alw_select_code
+
+# variables selected in more than 75% of the bootstrap runs by network-based penalized logistic regression
+var_selected_netw_75_select <- as.numeric(names(which(table(var_selected_netw_idx)>75)))
+var_selected_netw_75_select_code <- as.matrix(mcols(ensembl.protein.coding[colnames(xdata_less[,var_selected_netw_75_select]),2]))
+var_selected_netw_75_select_code
+
+# variables selected in common between penalized logistic regression and network-based penalized logistic regression
+common_var_selected_netw_75 <- var_selected_netw_75_select[which(var_selected_netw_75_select %in% var_selected_75_select)]
+common_var_selected_netw_75
+common_var_selected_netw_75_code <- var_selected_netw_75_select_code[which(var_selected_netw_75_select_code %in% var_selected_75_select_code)]
+common_var_selected_netw_75_code
+
+# distinct variables selected by penalized logistic regression
+distinct_var_selected_75 <- var_selected_75_select[-which(var_selected_75_select %in% var_selected_netw_75_select)]
+distinct_var_selected_75
+distinct_var_selected_75_code <- var_selected_75_select_code[-which(var_selected_75_select_code %in% var_selected_netw_75_select_code)]
+distinct_var_selected_75_code
+
+# distinct variables selected by network-based penalized logistic regression
+distinct_var_selected_netw_75 <- var_selected_netw_75_select[-which(var_selected_netw_75_select %in% var_selected_75_select)]
+distinct_var_selected_netw_75
+distinct_var_selected_netw_75_code <- var_selected_netw_75_select_code[-which(var_selected_netw_75_select_code %in% var_selected_75_select_code)]
+distinct_var_selected_netw_75_code
+```
+
+## BRCA tumor tissue vs. normal tissue
+
+Building train and test sets:
+
+```{r}
+xbrca_fit_norm <- xbrca_norm
+
+# building training and test sets (25 % assigned for testing)
+set.seed(2010)
+test_id <- sample(1:dim(xbrca_fit_norm)[1],round(dim(xbrca_fit_norm)[1]*0.25),replace=FALSE)
+
+xtrain <- xbrca_fit_norm[-test_id,]
+ytrain <- ybrca[-test_id]
+
+xtest <- xbrca_fit_norm[test_id,]
+ytest <- ybrca[test_id]
+```
+
+Classification by sparse logistic regression based on the elastic net (EN) penalty
+
+```{r}
+# cross-validation for finding optimum alpha
+my_alpha <- seq(0.5,0.9,0.1)
+
+# Optimizing alpha and lambda for logistic regression with Elastic net regularization
+nvar_selected_EN_brca <- matrix(0,1,length(my_alpha))
+pred_EN_cv_brca <- matrix(0,dim(xtrain)[1],length(my_alpha))
+MSE_EN_cv_brca <- matrix(0,1,length(my_alpha))
+PR_EN_cv_brca <- matrix(0,1,length(my_alpha))
+
+# assigning samples to folds, to be used in cross-validation when tunning alpha
+set.seed(2010)
+my_foldid_brca <- sample(1:10,size=length(ytrain),replace=TRUE)
+
+for (j in 1:length(my_alpha)){
+
+    # Logistic model fitting with 10-fold cross-validation for glmnet:
+    fit_EN_cv_brca <- cv.glmnet(as.matrix(xtrain),as.factor(ytrain),family="binomial",foldid=my_foldid_brca,alpha=my_alpha[j],type.measure="mse")
+    var_selected_EN_brca <- which(fit_EN_cv_brca$glmnet.fit$beta[,which(fit_EN_cv_brca$cvm == min(fit_EN_cv_brca$cvm))] != 0)
+    nvar_selected_EN_brca[j] <- length(var_selected_EN_brca)
+
+    # Predictions obtained by model i:
+    pred_EN_cv_brca[,j] <- predict(fit_EN_cv_brca,as.matrix(xtrain),s=fit_EN_cv_brca$lambda[which(fit_EN_cv_brca$cvm == min(fit_EN_cv_brca$cvm))],type="response")
+
+    # Mean squared error of prediction (MSE), area under theprecision recall curve:
+    MSE_EN_cv_brca[j] <- mean((ytrain-pred_EN_cv_brca[,j])^2)
+    PR_EN_cv_brca[j] <- pr.curve(scores.class0=as.vector(round(pred_EN_cv_brca[,j])), weights.class0=ytrain)$auc.integral
+}
+
+MSE_EN_cv_brca
+PR_EN_cv_brca
+nvar_selected_EN_brca
+my_alpha[which(MSE_EN_cv_brca == min(MSE_EN_cv_brca))]
+
+# sparse logistic regression
+
+fit_EN_cv_brca <- cv.glmnet(xtrain, as.factor(ytrain), family="binomial", nfolds=10, alpha=my_alpha[which(MSE_EN_cv_brca == min(MSE_EN_cv_brca))],foldid=my_foldid_brca, type.measure="mse")
+
+var_selected_EN_brca_idx <- which(fit_EN_cv_brca$glmnet.fit$beta[,which(fit_EN_cv_brca$cvm == min(fit_EN_cv_brca$cvm))] != 0)
+
+length(var_selected_EN_brca_idx)
+
+# variables code
+var_selected_EN_brca <- as.matrix(mcols(ensembl.protein.coding[colnames(xtrain[,var_selected_EN_brca_idx]),2]))
+var_selected_EN_brca
+
+## misclassifications, MSE ROC and PR
+
+# train set
+pred_EN_train_brca <- predict(fit_EN_cv_brca,xtrain,s="lambda.min",type="response")
+table(ytrain,round(pred_EN_train_brca))
+
+mse_EN_train_brca <- mean((ytrain - pred_EN_train_brca)^2)
+mse_EN_train_brca
+
+PR_EN_train_brca <- pr.curve(scores.class0=as.vector(round(pred_EN_train_brca)), weights.class0=ytrain)$auc.integral
+PR_EN_train_brca
+
+# test set
+pred_EN_test_brca <- predict(fit_EN_cv_brca,xtest,s="lambda.min",type="response")
+table(ytest,round(pred_EN_test_brca))
+
+mse_EN_test_brca <- mean((ytest - pred_EN_test_brca)^2)
+mse_EN_test_brca
+
+PR_EN_test_brca <- pr.curve(scores.class0=as.vector(round(pred_EN_test_brca)), weights.class0=ytest)$auc.integral
+PR_EN_test_brca
+```
+
+## PRAD tumor tissue vs. normal tissue
+
+Building train and test sets:
+
+```{r}
+xprad_fit_norm <- xprad_norm
+
+# building training and test sets (25 % assigned for testing)
+set.seed(2010)
+test_id <- sample(1:dim(xprad_fit_norm)[1],round(dim(xprad_fit_norm)[1]*0.25),replace=FALSE)
+
+xtrain <- xprad_fit_norm[-test_id,]
+ytrain <- yprad[-test_id]
+
+xtest <- xprad_fit_norm[test_id,]
+ytest <- yprad[test_id]
+```
+
+Classification by sparse logistic regression based on the elastic net (EN) penalty
+
+```{r}
+# cross-validation for finding optimum alpha
+my_alpha <- seq(0.5,0.9,0.1)
+
+# Optimizing alpha and lambda for logistic regression with Elastic net regularization
+nvar_selected_EN_prad <- matrix(0,1,length(my_alpha))
+pred_EN_cv_prad <- matrix(0,dim(xtrain)[1],length(my_alpha))
+MSE_EN_cv_prad <- matrix(0,1,length(my_alpha))
+PR_EN_cv_prad <- matrix(0,1,length(my_alpha))
+
+# assigning samples to folds, to be used in cross-validation when tunning alpha
+set.seed(2010)
+my_foldid_prad <- sample(1:10,size=length(ytrain),replace=TRUE)
+
+for (j in 1:length(my_alpha)){
+
+    # Logistic model fitting with 10-fold cross-validation for glmnet:
+    fit_EN_cv_prad <- cv.glmnet(as.matrix(xtrain),as.factor(ytrain),family="binomial",foldid=my_foldid_prad,alpha=my_alpha[j],type.measure="mse")
+    var_selected_EN_prad <- which(fit_EN_cv_prad$glmnet.fit$beta[,which(fit_EN_cv_prad$cvm == min(fit_EN_cv_prad$cvm))] != 0)
+    nvar_selected_EN_prad[j] <- length(var_selected_EN_prad)
+
+    # Predictions obtained by model i:
+    pred_EN_cv_prad[,j] <- predict(fit_EN_cv_prad,as.matrix(xtrain),s=fit_EN_cv_prad$lambda[which(fit_EN_cv_prad$cvm == min(fit_EN_cv_prad$cvm))],type="response")
+
+    # Mean squared error of prediction (MSE), area under the precision recall curve:
+    MSE_EN_cv_prad[j] <- mean((ytrain-pred_EN_cv_prad[,j])^2)
+    PR_EN_cv_prad[j] <- pr.curve(scores.class0=as.vector(round(pred_EN_cv_prad[,j])), weights.class0=ytrain)$auc.integral
+}
+
+MSE_EN_cv_prad
+PR_EN_cv_prad
+nvar_selected_EN_prad
+my_alpha[which(MSE_EN_cv_prad == min(MSE_EN_cv_prad))]
+
+# sparse logistic regression
+
+fit_EN_cv_prad <- cv.glmnet(xtrain, as.factor(ytrain), family="binomial", nfolds=10, alpha=my_alpha[which(MSE_EN_cv_prad == min(MSE_EN_cv_prad))],foldid=my_foldid_prad, type.measure="mse")
+
+var_selected_EN_prad_idx <- which(fit_EN_cv_prad$glmnet.fit$beta[,which(fit_EN_cv_prad$cvm == min(fit_EN_cv_prad$cvm))] != 0)
+
+length(var_selected_EN_prad_idx)
+
+# variables code
+var_selected_EN_prad <- as.matrix(mcols(ensembl.protein.coding[colnames(xtrain[,var_selected_EN_prad_idx]),2]))
+var_selected_EN_prad
+
+## misclassifications, MSE ROC and PR
+
+# train set
+pred_EN_train_prad <- predict(fit_EN_cv_prad,xtrain,s="lambda.min",type="response")
+table(ytrain,round(pred_EN_train_prad))
+
+mse_EN_train_prad <- mean((ytrain - pred_EN_train_prad)^2)
+mse_EN_train_prad
+
+PR_EN_train_prad <- pr.curve(scores.class0=as.vector(round(pred_EN_train_prad)), weights.class0=ytrain)$auc.integral
+PR_EN_train_prad
+
+# test set
+pred_EN_test_prad <- predict(fit_EN_cv_prad,xtest,s="lambda.min",type="response")
+table(ytest,round(pred_EN_test_prad))
+
+mse_EN_test_prad <- mean((ytest - pred_EN_test_prad)^2)
+mse_EN_test_prad
+
+PR_EN_test_prad <- pr.curve(scores.class0=as.vector(round(pred_EN_test_prad)), weights.class0=ytest)$auc.integral
+PR_EN_test_prad
+```
+
+Comparison between BRCAPRAD and BRCA nd PRAD models
+
+```{r,warning=FALSE,message=FALSE}
+# variables in common between network-based logistic regression and individual BRCA and PRAD models
+# BRCA
+var_selected_netw_75_select_code[which(var_selected_netw_75_select_code %in% var_selected_EN_brca)]
+# PRAD
+var_selected_netw_75_select_code[which(var_selected_netw_75_select_code %in% var_selected_EN_prad)]
+
+# variables in common between those exclusively selected by network-based logistic regression and individual BRCA and PRAD models
+# BRCA
+distinct_var_selected_netw_75_code[which(distinct_var_selected_netw_75_code %in% var_selected_EN_brca)]
+# PRAD
+distinct_var_selected_netw_75_code[which(distinct_var_selected_netw_75_code %in% var_selected_EN_prad)]
+
+# Venn diagram
+library("VennDiagram")
+venn_diagram <- venn.diagram( x = list( "twiner" = var_selected_netw_75_select_code, "EN" = var_selected_75_select_code, "EN-BRCA" = var_selected_EN_brca, "EN-PRAD" = var_selected_EN_prad), imagetype="png", filename = NULL, cat.fontface="bold", cat.cex=1.4, palette="ggplot2", label.col = c("white", "white", "white", "white", "white", "white", "white", "white", "white", "white", "white", "white", "white", "white", "white"), fontface="bold",cex = 1.8, fill = c("red3", "navyblue", "#FF99CC", "skyblue"))
+grid.draw(venn_diagram)
+
+# Gene networks
+qgraph_matrix <- xdata_less
+qgraph_vars <- c(var_selected_netw_75_select[-which(var_selected_netw_75_select %in% var_selected_75_select)],var_selected_75_select[-which(var_selected_75_select %in% var_selected_netw_75_select)],var_selected_netw_75_select[which(var_selected_netw_75_select %in% var_selected_75_select)])
+
+# BRCA tumor
+qgraph_cor_brca_tumor <- cor(qgraph_matrix[ylabel=="b" & ydata=="1",qgraph_vars], method="pearson")
+qgraph_cor_brca_normal <- cor(qgraph_matrix[ylabel=="b" & ydata=="0",qgraph_vars], method="pearson")
+
+qgraph_label <- c(distinct_var_selected_netw_75_code,distinct_var_selected_75_code,common_var_selected_netw_75_code)
+
+qgraph_groups <- list(netEN = c(1:length(distinct_var_selected_netw_75_code)), EN = (length(distinct_var_selected_netw_75_code)+1):(length(distinct_var_selected_netw_75_code)+length(distinct_var_selected_75_code)), common = (length(distinct_var_selected_75_code)+length(distinct_var_selected_netw_75_code)+1):(length(distinct_var_selected_75_code)+length(distinct_var_selected_netw_75_code)+length(common_var_selected_netw_75_code)))
+
+# PRAD tumor
+qgraph_cor_prad_tumor <- cor(qgraph_matrix[ylabel=="p" & ydata=="1",qgraph_vars], method="pearson")
+qgraph_cor_prad_normal <- cor(qgraph_matrix[ylabel=="p" & ydata=="0",qgraph_vars], method="pearson")
+
+library(qgraph)
+
+par(mfrow=c(1, 2))
+qgraph(qgraph_cor_brca_tumor, minimum = 0, vsize = 1.5, groups = qgraph_groups, legend=FALSE,borders = FALSE, node.width=4, color=c("#FF0000","#3333FF","#66FF33"),labels = qgraph_label, label.cex=2)
+title("ER+ BRCA tumor", line = 2.5)
+qgraph(qgraph_cor_prad_tumor, minimum = 0, vsize = 1.5, groups = qgraph_groups, legend=FALSE,borders = FALSE, node.width=4, color=c("#FF0000","#3333FF","#66FF33"),labels = qgraph_label, label.cex=2)
+title("PRAD tumor", line = 2.5)
+
+par(mfrow=c(1, 2))#,oma=c(0,0,0,0))
+qgraph(qgraph_cor_brca_normal, minimum = 0, vsize = 1.5, groups = qgraph_groups, legend=FALSE,borders = FALSE, node.width=4, color=c("#FF0000","#3333FF","#66FF33"),labels = qgraph_label, label.cex=2)
+title("BRCA normal", line = 2.5)
+qgraph(qgraph_cor_prad_normal, minimum = 0, vsize = 1.5, groups = qgraph_groups, legend=FALSE,borders = FALSE, node.width=4, color=c("#FF0000","#3333FF","#66FF33"),labels = qgraph_label, label.cex=2)
+title("PRAD normal", line = 2.5)
+
+# weights associated to the above selected variables
+brcaprad_weights_col <- matrix(1,1,length(brcaprad_weights_netw))
+brcaprad_weights_col[var_selected_75_select] <- "EN"
+brcaprad_weights_col[var_selected_netw_75_select] <- "twiner"
+brcaprad_weights_col[var_selected_75_select[which(var_selected_75_select %in% var_selected_netw_75_select)]] <- "common" 
+brcaprad_weights_col[brcaprad_weights_col ==1] <-"non-selected"
+
+brcaprad_weights_selected_common_plot <- data.frame(Variable = var_selected_75_select[which(var_selected_75_select %in% var_selected_netw_75_select)], Weight = brcaprad_weights_netw[var_selected_75_select[which(var_selected_75_select %in% var_selected_netw_75_select)]], label = factor(brcaprad_weights_col[var_selected_75_select[which(var_selected_75_select %in% var_selected_netw_75_select)]]))
+
+brcaprad_weights_selected_EN_plot <- data.frame(Variable = var_selected_75_select, Weight = brcaprad_weights_netw[var_selected_75_select], label = factor(brcaprad_weights_col[var_selected_75_select]))
+
+brcaprad_weights_selected_netEN_plot <- data.frame(Variable = var_selected_netw_75_select, Weight = brcaprad_weights_netw[var_selected_netw_75_select], label = factor(brcaprad_weights_col[var_selected_netw_75_select]))
+
+brcaprad_weights_plot <- data.frame(Variable = c(1:length(brcaprad_weights_netw)), Weight = brcaprad_weights_netw, label = factor(brcaprad_weights_col))
+
+library(ggplot2)
+
+ggplot(brcaprad_weights_plot, aes(Variable, Weight)) + geom_point(aes(color = label),size=1.2) + 
+scale_colour_manual(values=c("#00FF00","#3333FF","gray","#FF0000","#00FF00","#00FF00","#3333FF","#FF0000","#00FF00"))+
+theme_minimal()+theme(axis.text=element_text(size=16),axis.title=element_text(size=18),legend.title = element_text(size=14, color="white"),legend.text = element_text(size=18))+  geom_point(data=brcaprad_weights_selected_common_plot,aes(x=Variable, y=Weight), col="#00FF00",size=1.7) +
+geom_point(data=brcaprad_weights_selected_netEN_plot,aes(x=Variable, y=Weight), col="#FF0000",size=1.7) +  geom_point(data=brcaprad_weights_selected_EN_plot,aes(x=Variable, y=Weight), col="#3333FF",size=1.7) +  geom_point(data=brcaprad_weights_selected_common_plot,aes(x=Variable, y=Weight), col="#00FF00",size=1.7) 
+
+# variables selected by network-based sparse logistic regression only, with weights lower than 0.5, i.e., with more similar correlation pattern within brca and prad data sets
+as.matrix(mcols(ensembl.protein.coding[colnames(xdata_less[,var_selected_netw_75_select[which(brcaprad_weights_netw[var_selected_netw_75_select] < 0.5)]])]))
+
+```
+
+Survival analysis
+
+```{r,warning=FALSE,message=FALSE}
+library(survival)
+library(survminer)
+
+# BRCA
+xbrca_cox <- brca_tumor_erplus[,colnames(xdata_less)]
+xbrca_cox <- xbrca_cox[,var_selected_netw_75_select]
+xbrca_cox <- scale(log2(xbrca_cox+1))
+xbrca_cox_mat <- cbind(brca_survival_status,xbrca_cox)
+brca_fit_cox <- coxph(Surv(days_to_death,as.numeric(vital_status)) ~ .,data=as.data.frame(xbrca_cox_mat))
+
+brca_fit_cox_coefficients <- as.matrix(xbrca_cox) %*% brca_fit_cox$coefficients
+
+brca_fit_cox_risk_group <- brca_fit_cox_coefficients
+brca_fit_cox_risk_group[which(brca_fit_cox_coefficients > median(brca_fit_cox_coefficients))] <- 2
+brca_fit_cox_risk_group[which(brca_fit_cox_coefficients <= median(brca_fit_cox_coefficients))] <- 1
+
+brca_KM_mat <- as.data.frame(cbind(brca_survival_status[,1],brca_survival_status[,2],brca_fit_cox_risk_group))
+names(brca_KM_mat) <- c("survival","status","riskgroup")
+fit_KM <- survfit(Surv(as.numeric(survival),status) ~ riskgroup, data=brca_KM_mat, type="kaplan-meier", conf.type="plain")
+ggsurvplot(fit_KM,title="ER+ BRCA",font.main = c(16, "bold", "black"),legend.labs = c("low","high"), legend.title = "Risk group",pval=TRUE,palette = c("#009966","#FF3333"), xlab= "Time (days)")
+
+
+# PRAD
+xprad_cox <- prad_tumor[,colnames(xdata_less)]
+xprad_cox <- xprad_cox[,var_selected_75_select]
+xprad_cox <- scale(log2(xprad_cox+1))
+xprad_cox_mat <- cbind(prad_survival_status,xprad_cox)
+prad_fit_cox <- coxph(Surv(days_to_death,as.numeric(vital_status)) ~ .,data=as.data.frame(xprad_cox_mat))
+
+prad_fit_cox_coefficients <- as.matrix(xprad_cox) %*% prad_fit_cox$coefficients
+
+prad_fit_cox_risk_group <- prad_fit_cox_coefficients
+prad_fit_cox_risk_group[which(prad_fit_cox_coefficients > median(prad_fit_cox_coefficients))] <- 2
+prad_fit_cox_risk_group[which(prad_fit_cox_coefficients <= median(prad_fit_cox_coefficients))] <- 1
+
+prad_KM_mat <- as.data.frame(cbind(prad_survival_status[,1],as.numeric(prad_survival_status[,2]),prad_fit_cox_risk_group))
+names(prad_KM_mat) <- c("survival","status","riskgroup")
+
+fit_KM <- survfit(Surv(as.numeric(survival),status) ~ riskgroup, data=prad_KM_mat, type="kaplan-meier", conf.type="plain")
+
+ggsurvplot(fit_KM,title="PRAD",font.main = c(16, "bold", "black"),legend.labs = c("low","high"), legend.title = "Risk group",pval=TRUE,palette = c("#009966","#FF3333"), xlab= "Time (days)")
+```
+
+
